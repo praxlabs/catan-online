@@ -34,6 +34,13 @@
                     <button class="btn-secondary" onclick="initHostLobby()">Host Online Game</button>
                     <button class="btn-secondary" onclick="showJoinInput()">Join Online Game</button>
                 </div>
+
+                <!-- Invite banner shown when ?room= is in URL -->
+                <div id="invite-banner" style="display:none; margin-top: 18px; padding: 16px 20px; border-radius: 10px; background: rgba(212,175,55,0.1); border: 1px solid rgba(212,175,55,0.35); text-align: center;">
+                    <div style="font-size: 1.05rem; font-weight: 700; color: var(--gold); margin-bottom: 6px;">🎮 You've been invited to a Catan game!</div>
+                    <div style="font-size: 0.875rem; color: var(--text-muted); margin-bottom: 14px;">Enter your name above, then click the button below to join.</div>
+                    <button class="btn-primary" onclick="joinWithInvite()">Join Game</button>
+                </div>
             </div>
 
             <!-- Local Setup Panel -->
@@ -94,6 +101,7 @@
             <div class="status-panel">
                 <h2>Active Turn</h2>
                 <div id="game-status-text">--</div>
+                <div id="turn-timer" class="turn-timer" style="display:none;">10</div>
             </div>
 
             <div class="leaderboard-panel">
@@ -216,16 +224,34 @@
 
         let lobbyPlayers = []; // { name, peerId, isHost } (Used for online lobbies)
 
+        let pendingInviteRoomId = null;
+
         // Parse search query for join parameter on launch
         window.addEventListener('DOMContentLoaded', () => {
             const params = new URLSearchParams(window.location.search);
             const roomId = params.get('room');
             if (roomId) {
-                document.getElementById('player-name-input').value = "Settler " + Math.floor(Math.random() * 100);
-                showJoinInput();
-                document.getElementById('join-room-id').value = roomId;
+                pendingInviteRoomId = roomId;
+                // Show lobby with name input visible + invite banner
+                showMainMenu();
+                document.getElementById('invite-banner').style.display = 'block';
             }
         });
+
+        function joinWithInvite() {
+            if (!pendingInviteRoomId) return;
+            const myName = document.getElementById('player-name-input').value.trim();
+            if (!myName) {
+                document.getElementById('player-name-input').focus();
+                document.getElementById('player-name-input').style.borderColor = '#ff4b4b';
+                return;
+            }
+            document.getElementById('player-name-input').style.borderColor = '';
+            // Pre-fill room ID and connect
+            joinRoomContainer.style.display = 'none';
+            document.getElementById('join-room-id').value = pendingInviteRoomId;
+            connectToHostRoom();
+        }
 
         function showMainMenu() {
             lobbyOptions.style.display = 'block';
