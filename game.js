@@ -7,7 +7,7 @@ window.CatanGame = (function() {
         board: null,
         players: [],
         currentPlayerIdx: 0,
-        phase: 'lobby', // lobby, setup_round_1_settlement, setup_round_1_road, etc.
+        phase: 'lobby',
         dice: [1, 1],
         devCardDeck: [],
         turnState: {
@@ -18,18 +18,91 @@ window.CatanGame = (function() {
         gameLogs: [],
         longestRoadHolderId: null,
         largestArmyHolderId: null,
+        pendingTradeOffer: null, // moved into state so it syncs to clients
         multiplayer: {
             active: false,
-            role: null, // 'host' | 'client'
+            role: null,
             myPlayerId: null
         }
     };
 
     // UI State
-    let selectedBuildType = null; // 'settlement', 'road', 'city'
+    let selectedBuildType = null;
     let selectedDevCardToPlay = null;
     let localPlayerName = "Player";
-    let pendingTradeOffer = null; // { proposerId, offer, demand }
+
+    // Turn Timer
+    let turnTimerInterval = null;
+    let turnTimerSeconds = 0;
+    let lastTimerKey = null;
+
+    function startTurnTimer(seconds) {
+        clearTurnTimer();
+        turnTimerSeconds = seconds;
+        updateTimerDisplay(turnTimerSeconds);
+        turnTimerInterval = setInterval(() => {
+            turnTimerSeconds--;
+            updateTimerDisplay(turnTimerSeconds);
+            if (turnTimerSeconds <= 0) {
+                clearTurnTimer();
+                autoActOnTimeout();
+            }
+        }, 1000);
+    }
+
+    function clearTurnTimer() {
+        if (turnTimerInterval) { clearInterval(turnTimerInterval); turnTimerInterval = null; }
+        updateTimerDisplay(null);
+    }
+
+    function updateTimerDisplay(seconds) {
+        const el = document.getElementById('turn-timer');
+        if (!el) return;
+        if (seconds === null || seconds < 0) {
+            el.style.display = 'none';
+        } else {
+            el.style.display = 'flex';
+            el.textContent = seconds;
+            el.className = 'turn-timer' + (seconds <= 3 ? ' urgent' : '');
+        }
+    }
+
+    function autoActOnTimeout() {
+        const activePlayer = state.players[state.currentPlayerIdx];
+        if (!activePlayer || activePlayer.isAI) return;
+        if (state.multiplayer.active && state.multiplayer.myPlayerId !== state.currentPlayerIdx) return;
+
+        if (state.phase === 'roll') {
+            reducer({ type: 'ROLL_DICE' });
+        } else if (state.phase === 'setup_round_1_settlement' || state.phase === 'setup_round_2_settlement') {
+            const vId = window.CatanAI.chooseSetupSettlement(state.board, activePlayer.id);
+            reducer({ type: 'BUILD_SETTLEMENT', vertexId: vId });
+        } else if (state.phase === 'setup_round_1_road' || state.phase === 'setup_round_2_road') {
+            const eId = window.CatanAI.chooseSetupRoad(state.board, state.turnState.setupSettlementVertexId, activePlayer.id);
+            reducer({ type: 'BUILD_ROAD', edgeId: eId });
+        } else if (state.phase === 'robber_move') {
+            const { tileId } = window.CatanAI.chooseRobberPlacement(state.board, activePlayer.id, state.players);
+            reducer({ type: 'MOVE_ROBBER', tileId });
+        } else if (state.phase === 'main') {
+            reducer({ type: 'END_TURN' });
+        }
+    }
+
+    function maybeStartTimer() {
+        const activePlayer = state.players[state.currentPlayerIdx];
+        if (!activePlayer || activePlayer.isAI || state.phase === 'game_over') return;
+        if (state.multiplayer.active && state.multiplayer.myPlayerId !== state.currentPlayerIdx) { clearTurnTimer(); return; }
+
+        const timedPhases = ['roll', 'main', 'robber_move',
+            'setup_round_1_settlement', 'setup_round_1_road',
+            'setup_round_2_settlement', 'setup_round_2_road'];
+        if (!timedPhases.includes(state.phase)) { clearTurnTimer(); return; }
+
+        const key = `${state.currentPlayerIdx}-${state.phase}`;
+        if (key === lastTimerKey) return; // already ticking for this phase/player
+        lastTimerKey = key;
+        startTurnTimer(10);
+    }
 
     // Colors for players
     const PLAYER_COLORS = ['#ff4b4b', '#4b75ff', '#ffb04b', '#4bff7e'];
@@ -75,7 +148,9 @@ window.CatanGame = (function() {
         state.gameLogs = [];
         state.longestRoadHolderId = null;
         state.largestArmyHolderId = null;
+        state.pendingTradeOffer = null;
         state.multiplayer = { active: false, role: null, myPlayerId: null };
+        lastTimerKey = null;
 
         logMessage("Setup Phase 1: Place your first settlement.");
         updateVP();
@@ -90,6 +165,7 @@ window.CatanGame = (function() {
      */
     function loadHostState(newState) {
         state = newState;
+        lastTimerKey = null; // reset so timer restarts after state load
         render();
         if (state.phase !== 'game_over') {
             checkAILoop();
@@ -157,6 +233,10 @@ window.CatanGame = (function() {
      */
     function reducer(action) {
         if (state.phase === 'game_over') return;
+
+        // Clear timer on any player action
+        clearTurnTimer();
+        lastTimerKey = null;
 
         // Redirect client actions to host in multiplayer
         if (state.multiplayer.active && state.multiplayer.role === 'client') {
@@ -432,7 +512,7 @@ window.CatanGame = (function() {
 
             case 'PROPOSE_TRADE':
                 if (state.phase !== 'main') return;
-                pendingTradeOffer = {
+                state.pendingTradeOffer = {
                     proposerId: activePlayer.id,
                     receiverId: action.receiverId,
                     offer: action.offer,
@@ -445,17 +525,16 @@ window.CatanGame = (function() {
             case 'TRADE_RESPONSE':
                 if (state.phase !== 'trade_proposing') return;
                 if (action.accept) {
-                    const proposer = state.players[pendingTradeOffer.proposerId];
-                    const accepter = state.players[pendingTradeOffer.receiverId];
+                    const proposer = state.players[state.pendingTradeOffer.proposerId];
+                    const accepter = state.players[state.pendingTradeOffer.receiverId];
 
-                    // Swap resources
-                    Object.keys(pendingTradeOffer.offer).forEach(res => {
-                        const count = pendingTradeOffer.offer[res];
+                    Object.keys(state.pendingTradeOffer.offer).forEach(res => {
+                        const count = state.pendingTradeOffer.offer[res];
                         proposer.resources[res] -= count;
                         accepter.resources[res] += count;
                     });
-                    Object.keys(pendingTradeOffer.demand).forEach(res => {
-                        const count = pendingTradeOffer.demand[res];
+                    Object.keys(state.pendingTradeOffer.demand).forEach(res => {
+                        const count = state.pendingTradeOffer.demand[res];
                         accepter.resources[res] -= count;
                         proposer.resources[res] += count;
                     });
@@ -464,7 +543,7 @@ window.CatanGame = (function() {
                 } else {
                     logMessage(`❌ Trade declined.`);
                 }
-                pendingTradeOffer = null;
+                state.pendingTradeOffer = null;
                 state.phase = 'main';
                 break;
 
@@ -856,9 +935,9 @@ window.CatanGame = (function() {
         // Propose Trade Overlay
         const tradeModal = document.getElementById('trade-modal');
         if (tradeModal) {
-            if (state.phase === 'trade_proposing' && pendingTradeOffer !== null) {
-                const isReceiver = pendingTradeOffer.receiverId === myId;
-                const isProposer = pendingTradeOffer.proposerId === myId;
+            if (state.phase === 'trade_proposing' && state.pendingTradeOffer !== null) {
+                const isReceiver = state.pendingTradeOffer.receiverId === myId;
+                const isProposer = state.pendingTradeOffer.proposerId === myId;
 
                 if (isReceiver) {
                     tradeModal.style.display = 'flex';
@@ -876,6 +955,9 @@ window.CatanGame = (function() {
 
         // 8. Render SVG Board
         renderBoard(myId);
+
+        // 9. Start timer for human player turns
+        maybeStartTimer();
     }
 
     /**
@@ -1272,16 +1354,15 @@ window.CatanGame = (function() {
         const container = document.getElementById('trade-review-container');
         if (!container) return;
 
-        const proposer = state.players[pendingTradeOffer.proposerId];
-        const offerStr = Object.keys(pendingTradeOffer.offer).filter(k => pendingTradeOffer.offer[k] > 0).map(k => `${pendingTradeOffer.offer[k]} ${k}`).join(', ');
-        const demandStr = Object.keys(pendingTradeOffer.demand).filter(k => pendingTradeOffer.demand[k] > 0).map(k => `${pendingTradeOffer.demand[k]} ${k}`).join(', ');
+        const proposer = state.players[state.pendingTradeOffer.proposerId];
+        const offerStr = Object.keys(state.pendingTradeOffer.offer).filter(k => state.pendingTradeOffer.offer[k] > 0).map(k => `${state.pendingTradeOffer.offer[k]} ${k}`).join(', ');
+        const demandStr = Object.keys(state.pendingTradeOffer.demand).filter(k => state.pendingTradeOffer.demand[k] > 0).map(k => `${state.pendingTradeOffer.demand[k]} ${k}`).join(', ');
 
-        // Check if receiver has enough resources
         const myId = state.multiplayer.active ? state.multiplayer.myPlayerId : state.currentPlayerIdx;
         const myPlayer = state.players[myId];
         let hasEnough = true;
-        Object.keys(pendingTradeOffer.demand).forEach(res => {
-            if (myPlayer.resources[res] < pendingTradeOffer.demand[res]) {
+        Object.keys(state.pendingTradeOffer.demand).forEach(res => {
+            if (myPlayer.resources[res] < state.pendingTradeOffer.demand[res]) {
                 hasEnough = false;
             }
         });
