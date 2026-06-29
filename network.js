@@ -40,9 +40,12 @@ window.CatanNetwork = (function() {
                 }
             });
 
-            conn.on('data', (data) => {
+            conn.on('data', (rawData) => {
                 if (callbacks.onDataReceived) {
-                    callbacks.onDataReceived(conn, data);
+                    try {
+                        const data = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
+                        callbacks.onDataReceived(conn, data);
+                    } catch(e) { console.error('Host: failed to parse message', e); }
                 }
             });
 
@@ -85,9 +88,12 @@ window.CatanNetwork = (function() {
                 }
             });
 
-            connToHost.on('data', (data) => {
+            connToHost.on('data', (rawData) => {
                 if (callbacks.onDataReceived) {
-                    callbacks.onDataReceived(connToHost, data);
+                    try {
+                        const data = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
+                        callbacks.onDataReceived(connToHost, data);
+                    } catch(e) { console.error('Client: failed to parse message', e); }
                 }
             });
 
@@ -115,9 +121,10 @@ window.CatanNetwork = (function() {
      */
     function broadcast(data) {
         if (role !== 'host') return;
+        const payload = JSON.stringify(data);
         connections.forEach(conn => {
             if (conn.open) {
-                conn.send(data);
+                conn.send(payload);
             }
         });
     }
@@ -127,7 +134,7 @@ window.CatanNetwork = (function() {
      */
     function sendToHost(data) {
         if (role !== 'client' || !connToHost || !connToHost.open) return;
-        connToHost.send(data);
+        connToHost.send(JSON.stringify(data));
     }
 
     /**
